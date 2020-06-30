@@ -30,55 +30,12 @@ vnect_links = [[0, 16], [16, 1], [1, 2], [1, 5], [2, 3], [3, 4], [4, 17], [5, 6]
 [6, 7], [7, 18], [1,15], [15, 14], [14, 8], [8, 9], [9, 10], [10, 19], [14, 11],
 [11, 12], [12, 13], [13, 20]]
 
+avatar_links = [[7,6],[6,5],[5,4],[4,3],[3,2],[2,1],[1,0],[8,9],[9,10],[10,11],
+[11,22],[12,13],[13,14],[14,15],[15,23],[0,16],[16,17],[17,18],[18,24],[0,19],
+[19,20],[20,21],[21,25]]
 
-def img_scale(img, scale):
-    """
-    Resize a image by scale factor in both x and y directions.
-
-    :param img: input image
-    :param scale: scale factor, which is supposed to be side length of interpolated image / side length of source image
-    :return: the scaled image
-    """
-    return cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
-
-def img_padding(img, box_size, color='black'):
-    """
-    Given the input image and side length of the box, put the image into the center of the box.
-
-    :param img: the input color image, whose longer side is equal to box size
-    :param box_size: the side length of the square box
-    :param color: indicating the padding area color
-    :return: the padded image
-    """
-    h, w = img.shape[:2]
-    pad_num = 0
-    if not color == 'black':
-        if color == 'grey':
-            pad_num = 128
-    img_padded = np.ones((box_size, box_size, 3), dtype=np.uint8) * pad_num
-    if h > w:
-        img_padded[:, box_size // 2 - w // 2: box_size // 2 + int(np.ceil(w / 2)), :] = img
-    else:  # h <= w
-        img_padded[box_size // 2 - h // 2: box_size // 2 + int(np.ceil(h / 2)), :, :] = img
-    return img_padded
-
-def img_scale_squarify(img, box_size):
-    """
-    To scale and squarify the input image into a square box with fixed size.
-
-    :param img: the input color image
-    :param box_size: the length of the square box
-    :return: the box image
-    """
-    h, w = img.shape[:2]
-    scale = box_size / max(h, w)
-    img_scaled = img_scale(img, scale)
-    img_padded = img_padding(img_scaled, box_size)
-    assert img_padded.shape == (box_size, box_size, 3), 'padded image shape invalid'
-    return img_padded
 
 def draw_joints_2s(test_img, joints, scale_x, scale_y):
-
 
     for joint in joints:
         # pt_x = int(joint[0] * scale_x)
@@ -90,9 +47,6 @@ def draw_joints_2s(test_img, joints, scale_x, scale_y):
 
     # Plot limb colors
     for link_idx, link in enumerate(vnect_links):
-
-        print(link_idx)
-        print(link)
 
         x1 = joints[link[0], 0]
         y1 = joints[link[0], 1]
@@ -110,8 +64,156 @@ def draw_joints_2s(test_img, joints, scale_x, scale_y):
             cv2.fillConvexPoly(test_img, polygon, color=limb_color)
 
 
+def compute_avatar_links_length(skel_joints):
+
+    mid_pt = (skel_joints[8] + skel_joints[12]) / 2
+    nskel_jnts = np.append(skel_joints, [mid_pt], axis=0)
+
+    link_segments = [[7,5],[5,26],[26,2],[2,0],[26,9],[9,10],[10,11],[11,22],
+                     [26,13],[13,14],[14,15],[15,23],[0,16],[16,17],[17,18],
+                     [18,24],[0,19],[19,20],[20,21],[21,25]]
+
+    link_lengths = []
+    for link_seg in link_segments:
+
+        l1 = np.linalg.norm(nskel_jnts[link_seg[0]]-nskel_jnts[link_seg[1]])
+        link_lengths.append(l1)
+
+    np_link_lengths = np.array(link_lengths)
+    return np_link_lengths
+
+def get_delta_inc (pts_3d, length_array, vnect_start_idx, vnect_end_idx, avt_seg_idx):
+
+    al = length_array[avt_seg_idx]
+    start = pts_3d[vnect_start_idx]
+    end = pts_3d[vnect_end_idx]
+    vl = np.linalg.norm(start - end)
+    direction = (end - start) / vl
+
+    new_pos = start + direction * al
+    delta_inc = new_pos - end
+
+    return delta_inc
+
+def adjust_link_lengths(pts_3d, length_array):
+
+    new_pts_3d = np.zeros((pts_3d.shape[0], pts_3d.shape[1]))
+    # Hips
+    delta_inc = get_delta_inc(pts_3d, length_array, 14, 15, 3)
+    j_deltas = [15, 0, 1, 16, 2, 3, 4, 17, 5, 6, 7, 18]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Up Hips
+    delta_inc = get_delta_inc(pts_3d, length_array, 15, 1, 2)
+    j_deltas = [0, 1, 16, 2, 3, 4, 17, 5, 6, 7, 18]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Neck
+    delta_inc = get_delta_inc(pts_3d, length_array, 1, 16, 1)
+    j_deltas = [16, 0]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Head
+    delta_inc = get_delta_inc(pts_3d, length_array, 16, 0, 0)
+    j_deltas = [0]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Right shoulder
+    delta_inc = get_delta_inc(pts_3d, length_array, 1, 2, 4)
+    j_deltas = [2, 3, 4, 17]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Right upper arm
+    delta_inc = get_delta_inc(pts_3d, length_array, 2, 3, 5)
+    j_deltas = [3, 4, 17]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Right arm
+    delta_inc = get_delta_inc(pts_3d, length_array, 3, 4, 6)
+    j_deltas = [4, 17]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Right hand
+    delta_inc = get_delta_inc(pts_3d, length_array, 4, 17, 7)
+    j_deltas = [17]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Left shoulder
+    delta_inc = get_delta_inc(pts_3d, length_array, 1, 5, 8)
+    j_deltas = [5, 6, 7, 18]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Left upper arm
+    delta_inc = get_delta_inc(pts_3d, length_array, 5, 6, 9)
+    j_deltas = [6, 7, 18]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Left arm
+    delta_inc = get_delta_inc(pts_3d, length_array, 6, 7, 10)
+    j_deltas = [7, 18]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Left hand
+    delta_inc = get_delta_inc(pts_3d, length_array, 7, 18, 11)
+    j_deltas = [18]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Right hips
+    delta_inc = get_delta_inc(pts_3d, length_array, 14, 8, 12)
+    j_deltas = [8, 9, 10, 19]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Right up leg
+    delta_inc = get_delta_inc(pts_3d, length_array, 8, 9, 13)
+    j_deltas = [9, 10, 19]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Right leg
+    delta_inc = get_delta_inc(pts_3d, length_array, 9, 10, 14)
+    j_deltas = [10, 19]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Right foot
+    delta_inc = get_delta_inc(pts_3d, length_array, 10, 19, 15)
+    j_deltas = [19]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Left hips
+    delta_inc = get_delta_inc(pts_3d, length_array, 14, 11, 16)
+    j_deltas = [11, 12, 13, 20]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Left up leg
+    delta_inc = get_delta_inc(pts_3d, length_array, 11, 12, 17)
+    j_deltas = [12, 13, 20]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Left leg
+    delta_inc = get_delta_inc(pts_3d, length_array, 12, 13, 18)
+    j_deltas = [13, 20]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+    # Left foot
+    delta_inc = get_delta_inc(pts_3d, length_array, 13, 20, 19)
+    j_deltas = [20]
+    for j_delta in j_deltas:
+        new_pts_3d[j_delta] = pts_3d[j_delta] + delta_inc
+
+    return new_pts_3d
+
+
+
+
+
 INPUT_SIZE = 368
 
+# get avatar rest pose bones
+avatar_rest_pose_file = "/Users/jsanchez/Software/gitprojects/mocap_studio/avatar_rest_pose.npy"
+avatar_rest_pose = np.load(avatar_rest_pose_file)
+
+avatar_links_length = compute_avatar_links_length(avatar_rest_pose)
+
+print(avatar_links_length)
 
 # for f in range(num_files):
 for f in range(0,1):
@@ -136,8 +238,28 @@ for f in range(0,1):
     jnts_3d_file = "%s/%04d.npy" % (jnts_3d_path, f)
     jnts_3d = np.load(jnts_3d_file)
 
-    print(jnts_2d.shape)
-    print(jnts_3d.shape)
+    # find scale ratio
+    length_leg_vnect = np.linalg.norm(jnts_3d[11]-jnts_3d[12])
+    length_leg_avt = np.linalg.norm(avatar_rest_pose[19]-avatar_rest_pose[20])
+    scale_f = length_leg_avt / length_leg_vnect
+
+    jnts_3d = jnts_3d * scale_f
+
+    # rotate joints from z-forware y-up (vnect) to z-up y-forward (blender)
+    mat = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
+    jnts_3d = np.matmul(jnts_3d, mat)
+
+
+    # adjust lengths to blender skeleton lengths
+    jnts_3d = adjust_link_lengths (jnts_3d, avatar_links_length)
+
+    # check lengths are equal
+    print("Length check")
+    print(avatar_links_length[3])
+    print(np.linalg.norm(jnts_3d[15]-jnts_3d[14]))
+
+
+    # ----- Plot section -----
 
     draw_joints_2s(img, jnts_2d, 1.0, 1.0)
 
@@ -159,8 +281,6 @@ for f in range(0,1):
     # ax.set_xlabel('Z-axis')
     ax.legend()
 
-
-
     # # normalize axis visualization
     # X = jnts_3d[:,0]
     # Y = jnts_3d[:,1]
@@ -180,6 +300,27 @@ for f in range(0,1):
         line_y = [Y[vnect_links[l][0]], Y[vnect_links[l][1]]]
         line_z = [Z[vnect_links[l][0]], Z[vnect_links[l][1]]]
         plt.plot( line_x, line_y, line_z, 'b')
+
+
+    AX = avatar_rest_pose[:,0]
+    AY = avatar_rest_pose[:,1]
+    AZ = avatar_rest_pose[:,2]
+
+    ax.scatter(AX, AY, AZ, c='g', label='predictions')  # gt
+    # ax.set_xlabel('X-axis')
+    # ax.set_xlabel('Y-axis')
+    # ax.set_xlabel('Z-axis')
+    ax.legend()
+
+
+    for l in range(0, len(avatar_links)):
+    # for l in range(0, 1):
+        line_x = [AX[avatar_links[l][0]], AX[avatar_links[l][1]]]
+        line_y = [AY[avatar_links[l][0]], AY[avatar_links[l][1]]]
+        line_z = [AZ[avatar_links[l][0]], AZ[avatar_links[l][1]]]
+        plt.plot( line_x, line_y, line_z, 'b')
+
+
 
 
     # plt.axis('off')
