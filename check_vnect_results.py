@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import time
 import math
+import kalman
 
 vid_path = "/Users/jsanchez/Software/gitprojects/mocap_studio/vnect_res"
 vid_name = "vid1"
@@ -17,13 +18,6 @@ jnts_3d_path = "%s/%s/joints_3d" % (vid_path, vid_name)
 num_files = len([name for name in os.listdir(img_path)])
 print(num_files)
 fps = 20
-
-# asynchronize plots
-fig = plt.figure()
-
-fig2 = plt.figure()
-ax = Axes3D(fig2)
-plt.ion()
 
 # vnect_links
 vnect_links = [[0, 16], [16, 1], [1, 2], [1, 5], [2, 3], [3, 4], [4, 17], [5, 6],
@@ -60,7 +54,8 @@ def draw_joints_2s(test_img, joints, scale_x, scale_y):
                                        int(deg),
                                        0, 360, 1)
             color_code_num = link_idx // 4
-            limb_color = map(lambda x: x + 35 * (link_idx % 4), [139, 53, 255])
+            # limb_color = map(lambda x: x + 35 * (link_idx % 4), [139, 53, 255])
+            limb_color = [139, 53, 255]
             cv2.fillConvexPoly(test_img, polygon, color=limb_color)
 
 
@@ -98,6 +93,7 @@ def get_delta_inc (pts_3d, length_array, vnect_start_idx, vnect_end_idx, avt_seg
 def adjust_link_lengths(pts_3d, length_array):
 
     new_pts_3d = np.zeros((pts_3d.shape[0], pts_3d.shape[1]))
+    new_pts_3d[14] = pts_3d[14]
     # Hips
     delta_inc = get_delta_inc(pts_3d, length_array, 14, 15, 3)
     j_deltas = [15, 0, 1, 16, 2, 3, 4, 17, 5, 6, 7, 18]
@@ -201,8 +197,37 @@ def adjust_link_lengths(pts_3d, length_array):
 
     return new_pts_3d
 
+def rigid_transform_3D(A, B):
+    assert len(A) == len(B)
+    N = A.shape[0]; # total points
+    #print(A)
+    #print(B)
+    centroid_A = np.mean(A, axis=0)
+    centroid_B = np.mean(B, axis=0)
+    # centre the points
+    AA = A - np.tile(centroid_A, (N, 1))
+    BB = B - np.tile(centroid_B, (N, 1))
+    # dot is matrix multiplication for array
+    H = np.transpose(AA) @ BB
+    U, S, Vt = np.linalg.svd(H)
+    R = Vt.T @ U.T
+    # special reflection case
+    if np.linalg.det(R) < 0:
+        #print ("Reflection detected")
+        Vt[2,:] *= -1
+        R = Vt.T @ U.T
+    t = - R @ centroid_A.T + centroid_B.T
+    #print (t)
+
+    return R, t
 
 
+# asynchronize plots
+fig = plt.figure()
+
+# fig2 = plt.figure()
+# ax = Axes3D(fig2)
+plt.ion()
 
 
 INPUT_SIZE = 368
@@ -215,8 +240,20 @@ avatar_links_length = compute_avatar_links_length(avatar_rest_pose)
 
 print(avatar_links_length)
 
-# for f in range(num_files):
-for f in range(0,1):
+# Initialize kalman filter
+
+NUM_JOINTS = 21
+list_KFs = []
+for i in range(NUM_JOINTS):
+    KF = kalman.KF2d( dt = 5 ) # time interval: '1 frame'
+    init_P = 1*np.eye(4, dtype=np.float) # Error cov matrix
+    init_x = np.array([0,0,0,0], dtype=np.float) # [x loc, x vel, y loc, y vel]
+    dict_KF = {'KF':KF,'P':init_P,'x':init_x}
+    list_KFs.append(dict_KF)
+
+old_jnts_2d = np.zeros((21,2))
+for f in range(num_files):
+# for f in range(0,20):
 
     start = time.time()
 
@@ -235,6 +272,42 @@ for f in range(0,1):
     jnts_2d_file = "%s/%04d.npy" % (jnts_2d_path, f)
     jnts_2d = np.load(jnts_2d_file)
 
+    if f == 0 : # first frame dist = 0
+        for i, jnt_2d in enumerate(jnts_2d):
+            old_jnts_2d[i] = jnt_2d
+    else:
+        for i, jnt_2d in enumerate(jnts_2d):
+            jnts_dist = np.linalg.norm(jnt_2d - old_jnts_2d[i])
+            if jnts_dist > 25.0:
+                jnts_2d[i] = old_jnts_2d[i]
+            else:
+                old_jnts_2d[i] = jnt_2d
+
+
+    list_estimate = [] # kf filtered keypoints
+
+    for i, jnt_2d in enumerate(jnts_2d):
+
+        z = np.array( [jnt_2d[0], jnt_2d[1]], dtype=np.float)
+
+        KF = list_KFs[i]['KF']
+        x  = list_KFs[i]['x']
+        P  = list_KFs[i]['P']
+        
+        x, P, filtered_point = KF.process(x, P, z)
+
+        list_KFs[i]['KF'] = KF
+        list_KFs[i]['x']  = x
+        list_KFs[i]['P']  = P
+
+        # # visibility
+        # v = 0 if filtered_point[0] == 0 and filtered_point[1] == 0 else 2
+        # list_estimate.extend(list(filtered_point) + [v]) # x,y,v
+        list_estimate.extend(list(filtered_point)) # x,y,v
+
+    np_estimate_2d =  np.array(list_estimate)
+    estimate_jnts_2d = np.reshape(np_estimate_2d, (jnts_2d.shape[0], jnts_2d.shape[1]))
+
     jnts_3d_file = "%s/%04d.npy" % (jnts_3d_path, f)
     jnts_3d = np.load(jnts_3d_file)
 
@@ -248,92 +321,106 @@ for f in range(0,1):
     # rotate joints from z-forware y-up (vnect) to z-up y-forward (blender)
     mat = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
     jnts_3d = np.matmul(jnts_3d, mat)
+    # pts_vnect = np.array([jnts_3d[8], jnts_3d[11], jnts_3d[1]])
+    # mid_point = (avatar_rest_pose[8] +  avatar_rest_pose[12]) / 2
+    # pts_avatar = np.array([avatar_rest_pose[16], avatar_rest_pose[19], mid_point])
+
+    # init_R, initT = rigid_transform_3D (pts_vnect, pts_avatar)
+    # jnts_3d = np.matmul(jnts_3d, init_R)
+    # # jnts_3d = jnts_3d + initT
+
+    hips_avatar = avatar_rest_pose[0]
+    jnts_3d = jnts_3d + hips_avatar
+    print(jnts_3d.shape)
 
 
     # adjust lengths to blender skeleton lengths
     jnts_3d = adjust_link_lengths (jnts_3d, avatar_links_length)
 
-    # check lengths are equal
-    print("Length check")
-    print(avatar_links_length[3])
-    print(np.linalg.norm(jnts_3d[15]-jnts_3d[14]))
+    # # check lengths are equal
+    # print("Length check")
+    # print(avatar_links_length[3])
+    # print(np.linalg.norm(jnts_3d[15]-jnts_3d[14]))
 
 
     # ----- Plot section -----
 
-    draw_joints_2s(img, jnts_2d, 1.0, 1.0)
+    # draw_joints_2s(img, jnts_2d, 1.0, 1.0)
+    draw_joints_2s(img, estimate_jnts_2d, 1.0, 1.0)
 
-    plt.figure(1)
+    # plt.figure(1)
     plt.axis('off')
     plt.imshow(img)
 
-    plt.show(block=False)
+    # plt.show(block=False)
 
-    plt.figure(2)
+    # # --- plot 3d ---------
 
-    X = jnts_3d[:,0]
-    Y = jnts_3d[:,1]
-    Z = jnts_3d[:,2]
+    # plt.figure(2)
 
-    ax.scatter(X, Y, Z, c='b', label='predictions')  # gt
-    # ax.set_xlabel('X-axis')
-    # ax.set_xlabel('Y-axis')
-    # ax.set_xlabel('Z-axis')
-    ax.legend()
-
-    # # normalize axis visualization
     # X = jnts_3d[:,0]
     # Y = jnts_3d[:,1]
     # Z = jnts_3d[:,2]
-    max_range = np.array([X.max()-X.min(), Y.max()-Y.min(), Z.max()-Z.min()]).max() / 2.0
-    mid_x = (X.max()+X.min()) * 0.5
-    mid_y = (Y.max()+Y.min()) * 0.5
-    mid_z = (Z.max()+Z.min()) * 0.5
 
-    ax.set_xlim(mid_x - max_range, mid_x + max_range)
-    ax.set_ylim(mid_y - max_range, mid_y + max_range)
-    ax.set_zlim(mid_z - max_range, mid_z + max_range)
+    # ax.scatter(X, Y, Z, c='b', label='predictions')  # gt
+    # # ax.set_xlabel('X-axis')
+    # # ax.set_xlabel('Y-axis')
+    # # ax.set_xlabel('Z-axis')
+    # ax.legend()
 
-    for l in range(0, len(vnect_links)):
-    # for l in range(0, 1):
-        line_x = [X[vnect_links[l][0]], X[vnect_links[l][1]]]
-        line_y = [Y[vnect_links[l][0]], Y[vnect_links[l][1]]]
-        line_z = [Z[vnect_links[l][0]], Z[vnect_links[l][1]]]
-        plt.plot( line_x, line_y, line_z, 'b')
+    # # # normalize axis visualization
+    # # X = jnts_3d[:,0]
+    # # Y = jnts_3d[:,1]
+    # # Z = jnts_3d[:,2]
+    # max_range = np.array([X.max()-X.min(), Y.max()-Y.min(), Z.max()-Z.min()]).max() / 2.0
+    # mid_x = (X.max()+X.min()) * 0.5
+    # mid_y = (Y.max()+Y.min()) * 0.5
+    # mid_z = (Z.max()+Z.min()) * 0.5
 
+    # ax.set_xlim(mid_x - max_range, mid_x + max_range)
+    # ax.set_ylim(mid_y - max_range, mid_y + max_range)
+    # ax.set_zlim(mid_z - max_range, mid_z + max_range)
 
-    AX = avatar_rest_pose[:,0]
-    AY = avatar_rest_pose[:,1]
-    AZ = avatar_rest_pose[:,2]
-
-    ax.scatter(AX, AY, AZ, c='g', label='predictions')  # gt
-    # ax.set_xlabel('X-axis')
-    # ax.set_xlabel('Y-axis')
-    # ax.set_xlabel('Z-axis')
-    ax.legend()
-
-
-    for l in range(0, len(avatar_links)):
-    # for l in range(0, 1):
-        line_x = [AX[avatar_links[l][0]], AX[avatar_links[l][1]]]
-        line_y = [AY[avatar_links[l][0]], AY[avatar_links[l][1]]]
-        line_z = [AZ[avatar_links[l][0]], AZ[avatar_links[l][1]]]
-        plt.plot( line_x, line_y, line_z, 'b')
+    # for l in range(0, len(vnect_links)):
+    # # for l in range(0, 1):
+    #     line_x = [X[vnect_links[l][0]], X[vnect_links[l][1]]]
+    #     line_y = [Y[vnect_links[l][0]], Y[vnect_links[l][1]]]
+    #     line_z = [Z[vnect_links[l][0]], Z[vnect_links[l][1]]]
+    #     plt.plot( line_x, line_y, line_z, 'b')
 
 
+    # AX = avatar_rest_pose[:,0]
+    # AY = avatar_rest_pose[:,1]
+    # AZ = avatar_rest_pose[:,2]
+
+    # ax.scatter(AX, AY, AZ, c='g', label='predictions')  # gt
+    # # ax.set_xlabel('X-axis')
+    # # ax.set_xlabel('Y-axis')
+    # # ax.set_xlabel('Z-axis')
+    # ax.legend()
 
 
-    # plt.axis('off')
-    # plt.imshow(img)
+    # for l in range(0, len(avatar_links)):
+    # # for l in range(0, 1):
+    #     line_x = [AX[avatar_links[l][0]], AX[avatar_links[l][1]]]
+    #     line_y = [AY[avatar_links[l][0]], AY[avatar_links[l][1]]]
+    #     line_z = [AZ[avatar_links[l][0]], AZ[avatar_links[l][1]]]
+    #     plt.plot( line_x, line_y, line_z, 'b')
 
-    # plt.show()
 
-    ax.view_init(elev=9, azim=-68)
+
+
+    # # plt.axis('off')
+    # # plt.imshow(img)
+
+    # # plt.show()
+
+    # ax.view_init(elev=9, azim=-68)
     #plt.show()
     #time.sleep(0.5)
-    plt.show(block=True)
+    plt.show(block=False)
     plt.pause(0.01)
-    ax.cla()
+    # ax.cla()
 
     # plt.pause(0.01)
     # time.sleep(max(1./fps - (time.time() - start), 0))
