@@ -255,6 +255,38 @@ if __name__ == "__main__":
         cap.release()
         cv2.destroyAllWindows()
 
+    # pre-processed vnect frames
+    elif sys.argv[1] == "-frames_vnect":
+        frames_folder = sys.argv[2]
+        fps = int(sys.argv[3])
+
+        num_files = len([name for name in os.listdir(frames_folder)])
+
+        for f in range(num_files):
+
+            jnts_3d_file = "%s/%04d.npy" % (jnts_3d_path, f)
+            jnts_3d = np.load(jnts_3d_file)
+
+            # find scale ratio
+            length_leg_vnect = np.linalg.norm(jnts_3d[11]-jnts_3d[12])
+            length_leg_avt = np.linalg.norm(avatar_rest_pose[19]-avatar_rest_pose[20])
+            scale_f = length_leg_avt / length_leg_vnect
+
+            jnts_3d = jnts_3d * scale_f
+
+            # rotate joints from z-forware y-up (vnect) to z-up y-forward (blender)
+            mat = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]])
+            jnts_3d = np.matmul(jnts_3d, mat)
+
+            hips_avatar = avatar_rest_pose[0]
+            jnts_3d = jnts_3d + hips_avatar
+
+            # adjust lengths to blender skeleton lengths
+            jnts_3d = adjust_link_lengths (jnts_3d, avatar_links_length)
+
+            send_array(socket, jnts_3d)
+
+
     # option read frame files
     elif sys.argv[1] == '-frames_humaneva':
         frames_folder = sys.argv[2]
